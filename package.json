@@ -1,0 +1,44 @@
+{
+  "name": "static-md-e2e",
+  "version": "0.1.0",
+  "description": "Local MCP server that lets AI agents read and write end-to-end encrypted static.md notes. Keys and plaintext stay on your computer.",
+  "license": "MIT",
+  "type": "module",
+  "homepage": "https://static.md/agents#agents-encrypted",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/static-md/e2e-bridge.git"
+  },
+  "keywords": ["mcp", "static.md", "end-to-end encryption", "e2e", "markdown", "notes", "claude", "cursor"],
+  "bin": {
+    "static-md-e2e": "dist/cli.js"
+  },
+  "exports": {
+    ".": "./dist/index.js"
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "build": "tsc -p .",
+    "test": "vitest run",
+    "prepublishOnly": "npm run build && npm test"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/client": "2.2.0",
+    "@modelcontextprotocol/server": "2.2.0",
+    "fast-diff": "1.3.0",
+    "yjs": "13.6.30",
+    "zod": "4.3.6"
+  },
+  "devDependencies": {
+    "@types/node": "25.5.0",
+    "typescript": "6.0.2",
+    "vitest": "4.1.4"
+  }
+}
