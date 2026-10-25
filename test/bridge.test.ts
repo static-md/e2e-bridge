@@ -8,11 +8,12 @@ import { fileKeyring, memoryKeyring, type Keyring } from '../src/keyring';
 import { RemoteError, parseCiphertext, type NoteCiphertext, type RemoteNotes } from '../src/remote';
 import { decrypt, fromBase64, noteKey, parseNote } from '../src/noteKey';
 import { initialUpdate, noteText, openNote, seal } from '../src/noteDoc';
+import { MAX_FOLDER_DEPTH, MAX_FOLDER_NAME, parseFolder } from '../src/folder';
 
 // The bridge's tools over MCP, with static.md replaced by a fake that keeps
 // what it is sent: the tests check that what reaches it is ciphertext only.
 
-interface FakeNote { title: string; updates: Array<{ ref: string; data: string }>; canEdit: boolean; canCompact: boolean }
+interface FakeNote { title: string; folder?: string; updates: Array<{ ref: string; data: string }>; canEdit: boolean; canCompact: boolean }
 
 function fakeStaticMd() {
   const notes = new Map<string, FakeNote>();
@@ -25,11 +26,11 @@ function fakeStaticMd() {
       if (!note) throw new RemoteError(`No note with id "${id}" that you can access.`);
       return { id, title: note.title, canEdit: note.canEdit, canCompact: note.canCompact, updates: [...note.updates] } satisfies NoteCiphertext;
     },
-    async create(title, ciphertext) {
-      sent.push(JSON.stringify({ title, ciphertext }));
+    async create(title, ciphertext, folder) {
+      sent.push(JSON.stringify({ title, ciphertext, folder }));
       const id = `note${++n}`;
-      notes.set(id, { title: title ?? 'UNTITLED', updates: [{ ref: 'initial', data: ciphertext }], canEdit: true, canCompact: true });
-      return { id, title: title ?? 'UNTITLED' };
+      notes.set(id, { title: title ?? 'UNTITLED', folder: folder ?? '/', updates: [{ ref: 'initial', data: ciphertext }], canEdit: true, canCompact: true });
+      return { id, title: title ?? 'UNTITLED', folder: folder ?? '/' };
     },
     async write(id, ciphertext, replaces) {
       sent.push(JSON.stringify({ id, ciphertext, replaces }));
@@ -80,6 +81,10 @@ describe('bridge tools', () => {
       update_encrypted_note: { title: undefined, readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: false },
     });
     expect(client.getInstructions()).toMatch(/Never pass a note's key/);
+    expect(client.getInstructions()).toMatch(/Titles and folder names aren't encrypted/);
+    const create = tools.find((t) => t.name === 'create_encrypted_note')!;
+    expect(Object.keys(create.inputSchema.properties ?? {})).toEqual(['title', 'markdown', 'folder']);
+    expect(create.inputSchema.required ?? []).toEqual([]);
   });
 
   it('creates, reads, appends to and replaces a note, sending static.md ciphertext only', async () => {
@@ -194,6 +199,66 @@ describe('bridge tools', () => {
     expect(new TextDecoder().decode(await decrypt(fromBase64(note.updates[0].data), key)).length).toBeGreaterThan(0);
   });
 
+  it('files a new note in a folder, normalised as static.md stores it', async () => {
+    const { call } = await connectBridge(fake.remote);
+    const created = await call('create_encrypted_note', { title: 'Launch plan', markdown: 'Ship it.', folder: ' work//launch/ ' });
+    expect(created.isError).toBeFalsy();
+    const { id, emojis } = parseNote(created.structuredContent!.link as string)!;
+    expect(created.structuredContent).toMatchObject({ id, title: 'Launch plan', folder: '/work/launch' });
+    expect(textOf(created)).toMatch(/^Created end-to-end encrypted note "Launch plan" in \/work\/launch: https:\/\/static\.md\/md\//);
+    expect(textOf(created)).toMatch(/Its title and folder are not encrypted/);
+    expect(fake.notes.get(id)!.folder).toBe('/work/launch');
+    expect(await decryptStored(fake.notes.get(id)!, emojis!)).toBe('Ship it.');
+    expect(JSON.parse(fake.sent[0])).toMatchObject({ title: 'Launch plan', folder: '/work/launch' });
+    expect(fake.sent.join('\n')).not.toContain('Ship it');
+    // The note reads back as any other
+    expect(markdownOf(await call('read_encrypted_note', { note: id }))).toBe('Ship it.');
+
+    // "/" is the top level, static.md's default, so it isn't sent
+    const top = await call('create_encrypted_note', { markdown: 'x', folder: '/' });
+    expect(top.structuredContent).toMatchObject({ folder: '/' });
+    expect(textOf(top)).toMatch(/" at the top level: /);
+    expect(JSON.parse(fake.sent[2])).not.toHaveProperty('folder');
+    // No folder: as before
+    const plain = await call('create_encrypted_note', { markdown: 'y' });
+    expect(textOf(plain)).toMatch(/Its title is not encrypted/);
+    expect(JSON.parse(fake.sent[3])).not.toHaveProperty('folder');
+  });
+
+  it('refuses a folder static.md would refuse, before encrypting or sending anything', async () => {
+    const { call } = await connectBridge(fake.remote);
+    const cases: Array<[string, RegExp]> = [
+      ['my diary', /Folder names use letters A-Z, digits/],
+      ['Заметки', /Folder names use letters A-Z, digits/],
+      ['a#key=😀😁😂😃😄😅😆😇', /Folder names use letters A-Z, digits/],
+      ['../etc', /can't be named "\.\."/],
+      ['a/./b', /can't be named "\."/],
+      ['a'.repeat(MAX_FOLDER_NAME + 1), /up to 10 levels of 64 characters/],
+      ['a/'.repeat(MAX_FOLDER_DEPTH + 1), /up to 10 levels of 64 characters/],
+      ['shared_with_me/x', /notes other people share with you/],
+    ];
+    for (const [folder, reason] of cases) {
+      const res = await call('create_encrypted_note', { markdown: 'secret', folder });
+      expect(res.isError, folder).toBe(true);
+      expect(textOf(res), folder).toMatch(/^Nothing was sent to static\.md\. Not a valid folder: /);
+      expect(textOf(res), folder).toMatch(reason);
+    }
+    expect(fake.sent).toHaveLength(0);
+    // Longer than static.md takes: the tool's schema stops it
+    expect((await call('create_encrypted_note', { markdown: 'x', folder: 'a/'.repeat(400) })).isError).toBe(true);
+    expect(fake.sent).toHaveLength(0);
+  });
+
+  it('says so when static.md doesn\'t confirm the folder', async () => {
+    // A static.md from before folders ignores the argument
+    const old: RemoteNotes = { ...fake.remote, create: async (title, ciphertext) => ({ ...(await fake.remote.create(title, ciphertext)), folder: undefined }) };
+    const { call } = await connectBridge(old);
+    const res = await call('create_encrypted_note', { markdown: 'x', folder: 'work' });
+    expect(res.isError).toBeFalsy();
+    expect(res.structuredContent).not.toHaveProperty('folder');
+    expect(textOf(res)).toMatch(/^Created end-to-end encrypted note "UNTITLED": .*\nstatic\.md didn't confirm the folder, so the note may be at the top level instead of \/work\. Move it with move_item/);
+  });
+
   it('refuses a key in the title before sending anything', async () => {
     const { call } = await connectBridge(fake.remote);
     const res = await call('create_encrypted_note', { title: 'static.md/md/abc#key=😀😁😂😃😄😅😆😇', markdown: 'x' });
@@ -207,14 +272,14 @@ describe('bridge tools', () => {
     const refusing: RemoteNotes = {
       ...fake.remote,
       create: async () => {
-        throw new RemoteError('static.md refused create_note_ciphertext.', 'Agent access to end-to-end encrypted notes is a Pro feature. Upgrade on static.md: https://static.md/pricing?from=mcp-e2e');
+        throw new RemoteError('static.md refused create_note_ciphertext.', "Agent access to end-to-end encrypted notes isn't included in your static.md plan; it comes with Pro. Plans: https://static.md/pricing?from=mcp-e2e");
       },
     };
     const free = await connectBridge(refusing);
     const res = await free.call('create_encrypted_note', { markdown: 'x' });
     expect(res.isError).toBe(true);
     // static.md's words reach the agent fenced: a server mustn't instruct an agent that holds keys
-    expect(textOf(res)).toMatch(/^static\.md refused create_note_ciphertext\.\nThe answer from static\.md between the markers .*\n<<<untrusted [0-9a-f]{8}>>>\nAgent access to end-to-end encrypted notes is a Pro feature/);
+    expect(textOf(res)).toMatch(/^static\.md refused create_note_ciphertext\.\nThe answer from static\.md between the markers .*\n<<<untrusted [0-9a-f]{8}>>>\nAgent access to end-to-end encrypted notes isn't included in your static\.md plan/);
   });
 
   it('only edits notes whose key it can check', async () => {
@@ -270,5 +335,20 @@ describe('parseCiphertext', () => {
     expect(() => parseCiphertext(fence(body.replace('v1', 'v9')), 'n1')).toThrow(RemoteError);
     expect(() => parseCiphertext(fence('{"format":"static.md/e2e-note/v1","id":"n1","updates":[{"ref":1}]}'), 'n1')).toThrow(RemoteError);
     expect(() => parseCiphertext('no fence', 'n1')).toThrow(RemoteError);
+  });
+});
+
+describe('parseFolder', () => {
+  it('normalises folders as static.md stores them', () => {
+    expect(parseFolder('work/launch')).toEqual({ path: '/work/launch' });
+    expect(parseFolder(' /work//launch/ ')).toEqual({ path: '/work/launch' });
+    expect(parseFolder('Work/2026-10_Q4.v2')).toEqual({ path: '/Work/2026-10_Q4.v2' });
+    expect(parseFolder('x.y-z_1/..a')).toEqual({ path: '/x.y-z_1/..a' });
+    expect(parseFolder('')).toEqual({ path: '/' });
+    expect(parseFolder('//')).toEqual({ path: '/' });
+    expect(parseFolder('a/'.repeat(MAX_FOLDER_DEPTH))).toHaveProperty('path');
+    expect(parseFolder('a'.repeat(MAX_FOLDER_NAME))).toHaveProperty('path');
+    // Only the top-level shared_with_me is static.md's
+    expect(parseFolder('work/shared_with_me')).toEqual({ path: '/work/shared_with_me' });
   });
 });

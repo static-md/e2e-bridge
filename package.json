@@ -1,6 +1,6 @@
 {
   "name": "static-md-e2e",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Local MCP server that lets AI agents read and write end-to-end encrypted static.md notes. Keys and plaintext stay on your computer.",
   "license": "MIT",
   "type": "module",

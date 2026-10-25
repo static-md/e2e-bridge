@@ -5,6 +5,7 @@
  */
 import { Client, StreamableHTTPClientTransport } from '@modelcontextprotocol/client';
 import type { StoredUpdate } from './noteDoc.js';
+import { storedFolder } from './folder.js';
 
 export const DEFAULT_MCP_URL = 'https://static.md/mcp';
 /** What read_note_ciphertext answers with; anything else is refused */
@@ -23,7 +24,11 @@ export interface NoteCiphertext {
 /** What the bridge needs from static.md */
 export interface RemoteNotes {
   read(id: string): Promise<NoteCiphertext>;
-  create(title: string | undefined, ciphertext: string): Promise<{ id: string; title: string }>;
+  /**
+   * `folder` is a path as parseFolder returns it, such as "/work/launch".
+   * The answer's folder is where static.md says it filed the note, when it says.
+   */
+  create(title: string | undefined, ciphertext: string, folder?: string): Promise<{ id: string; title: string; folder?: string }>;
   write(id: string, ciphertext: string, replaces?: string[]): Promise<{ replaced: number }>;
 }
 
@@ -111,11 +116,17 @@ export function mcpRemote(opts: { token: string; url?: string; version: string }
     async read(id) {
       return parseCiphertext(textOf(await call('read_note_ciphertext', { id })), id);
     },
-    async create(title, ciphertext) {
-      const r = await call('create_note_ciphertext', { ...(title === undefined ? {} : { title }), ciphertext });
+    async create(title, ciphertext, folder) {
+      const r = await call('create_note_ciphertext', {
+        ...(title === undefined ? {} : { title }),
+        ciphertext,
+        ...(folder === undefined ? {} : { folder }),
+      });
       const s = r.structuredContent ?? {};
       if (typeof s.id !== 'string') throw new RemoteError('static.md created the note but did not say its id.');
-      return { id: s.id, title: typeof s.title === 'string' ? s.title : 'UNTITLED' };
+      // Only a well-formed folder is passed on: the agent sees it unfenced
+      const filed = storedFolder(s.folder);
+      return { id: s.id, title: typeof s.title === 'string' ? s.title : 'UNTITLED', ...(filed === undefined ? {} : { folder: filed }) };
     },
     async write(id, ciphertext, replaces) {
       const r = await call('write_note_ciphertext', { id, ciphertext, ...(replaces?.length ? { replaces } : {}) });

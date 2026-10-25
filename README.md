@@ -74,8 +74,30 @@ Keep the regular static.md server (`https://static.md/mcp`) connected too: it ha
 | Tool | What it does |
 |------|--------------|
 | `read_encrypted_note` | Decrypts a note and returns its markdown, marked as untrusted user content. |
-| `create_encrypted_note` | Encrypts new markdown with a fresh key, creates the note and returns its full link (`…#key=…`). |
+| `create_encrypted_note` | Encrypts new markdown with a fresh key, creates the note, optionally in a folder, and returns its full link (`…#key=…`). |
 | `update_encrypted_note` | Appends to a note or replaces it. Only the change is encrypted and sent, so it merges with live edits. |
+
+### Examples
+
+Ask in plain words; the agent picks the tool and its arguments.
+
+| You ask | The agent calls |
+|---|---|
+| Save these meeting notes as an encrypted note in my work/launch folder. | `create_encrypted_note` `{ "title": "Launch sync", "markdown": "# Launch sync\n\n- Ship Friday", "folder": "work/launch" }` |
+| Add "Budget approved" to https://static.md/md/k3v9qa#key=… | `update_encrypted_note` `{ "note": "https://static.md/md/k3v9qa#key=…", "markdown": "Budget approved", "mode": "append" }` |
+| What does my encrypted note k3v9qa say? (key saved on this computer) | `read_encrypted_note` `{ "note": "k3v9qa" }` |
+
+Creating a note answers with its full link, `https://static.md/md/<id>#key=…`, and where static.md filed it (`in /work/launch`).
+
+### Folders
+
+`create_encrypted_note` takes an optional `folder`, the same as static.md's other create tools: a path such as `work/launch` or `/work/launch`. Leave it out, or give `/`, for the top level. A folder exists while something is in it, so a new one needs no setup.
+
+- Folder names use letters A–Z, digits, `-`, `_` and `.`, separated by `/`, up to 10 levels of 64 characters each.
+- `shared_with_me` can't be a top-level folder: static.md lists notes others share with you there.
+- **Folder names aren't encrypted**, like titles. Keep anything private out of them.
+
+The bridge checks the folder with static.md's rules before it encrypts anything, so a folder static.md would refuse fails with the reason and nothing is sent. To list encrypted notes by folder, or move one, use static.md's regular server (`list_my_notes`, `move_item`): it sees titles and folders, never the text.
 
 ## Giving the agent a key
 
@@ -98,7 +120,7 @@ Whatever the agent creates comes back as a full link: keep it. static.md can't r
 |---|---|---|---|
 | Note text | ❌ ciphertext only | ✅ what the agent reads or writes | ✅ in memory |
 | Key | ❌ never | only if you paste the link | ✅ memory, or the key file if you save it |
-| Title | ✅ titles aren't encrypted | ✅ | ✅ |
+| Title and folder | ✅ titles and folders aren't encrypted | ✅ | ✅ |
 | Metadata | ✅ ids, owner, sharing, sizes, update times, the token used, IP | | |
 
 static.md's server tools have no parameter that takes a key, and they refuse text that contains a `#key=` link, so a key can't end up stored next to a note by accident. A changed or forged update fails AES-GCM authentication and is left out of what the agent reads (the answer says how many). The bridge won't edit a note when any of its updates fail to decrypt, since the web app won't open a note with an update it can't decrypt. Messages from static.md reach the agent fenced as untrusted, like note text.
@@ -110,7 +132,7 @@ The bridge has no secret logic. To write your own client:
 - **Key:** the 8 emojis from `#key=` (the web app's 840-emoji alphabet, exported here as `EMOJI_ALPHABET`). AES-256 key = SHA-256 of the 8 emojis joined, as UTF-8.
 - **A stored update:** base64 of `IV (12 random bytes) ‖ AES-256-GCM ciphertext ‖ tag (16 bytes)`. The plaintext is a [Yjs](https://yjs.dev) update.
 - **A note:** all of its stored updates. Decrypt each one and apply them all to one `Y.Doc`, in any order. The markdown is `doc.getText('codemirror')`.
-- **static.md's MCP tools** (`https://static.md/mcp`): `read_note_ciphertext` returns the updates as JSON (`static.md/e2e-note/v1`). `create_note_ciphertext` creates a note from its first encrypted update. `write_note_ciphertext` adds one, and the owner can compact the note with it.
+- **static.md's MCP tools** (`https://static.md/mcp`): `read_note_ciphertext` returns the updates as JSON (`static.md/e2e-note/v1`). `create_note_ciphertext` creates a note from its first encrypted update, optionally in a `folder`. `write_note_ciphertext` adds one, and the owner can compact the note with it.
 
 ## Development
 

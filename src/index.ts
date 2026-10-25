@@ -18,3 +18,4 @@ export {
   type NoteKey,
   type NoteRef,
 } from './noteKey.js';
+export { parseFolder, FOLDER_FORMAT, MAX_FOLDER_DEPTH, MAX_FOLDER_NAME, MAX_FOLDER_INPUT } from './folder.js';
